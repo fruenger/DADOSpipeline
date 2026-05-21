@@ -687,6 +687,225 @@ class DADOSobservation:
 
 
 
+    def get_spectrum(self, spectrum_raw_image, flat_correction=False, readout_kwargs=None, calibration_kwargs=None):
+        """
+        Extract wavelength-calibrated spectra from a raw science image.
+
+        This is a high-level convenience wrapper that performs:
+
+        1. Spectral order extraction from the wavelength-calibration frame.
+        2. Blind wavelength calibration for each extracted order via
+        :func:`get_wavelength_solution_blind`.
+        3. Extraction of the science spectrum from ``spectrum_raw_image``.
+        4. Optional flat-field correction using the stored master flat.
+        5. Construction of wavelength-flux arrays for each spectral order.
+
+        The extraction geometry and wavelength-calibration behaviour can be
+        customised through the ``readout_kwargs`` and
+        ``calibration_kwargs`` dictionaries.
+
+        Parameters
+        ----------
+        spectrum_raw_image : np.ndarray or str
+            Two-dimensional science image containing the spectrum to extract,
+            or a path to a FITS file readable by ``astropy.io.fits.getdata``.
+        flat_correction : bool, optional
+            If ``True``, divides the extracted science flux by the extracted
+            flat-field flux for each order. Defaults to ``False``.
+        readout_kwargs : dict or None, optional
+            Dictionary of keyword arguments forwarded to
+            :meth:`extract_flux`.
+
+            Supported keys are:
+
+            ``aperture_offsets`` : float or None
+                Spatial offset of the extraction aperture in pixels.
+                ``None`` is interpreted as ``0.``.
+            ``aperture_height`` : float or None
+                Height of the extraction aperture in pixels.
+                If ``None``, the full order width is used.
+            ``order`` : int or None
+                Index of a single spectral order to extract.
+                If ``None``, all orders are processed.
+
+            Defaults to ``None`` (equivalent to an empty dictionary).
+        calibration_kwargs : dict or None, optional
+            Dictionary of keyword arguments forwarded internally to
+            :func:`get_wavelength_solution_blind`.
+
+            Supported keys are:
+
+            ``poly_order`` : int
+                Polynomial degree of the wavelength solution.
+            ``pattern_size`` : int
+                Number of lines per pattern used for blind matching.
+            ``overhang`` : int
+                Number of anchor points used for extrapolation.
+            ``peak_min_dist`` : int
+                Minimum distance between neighbouring arc peaks in pixels.
+            ``peak_prominence_threshold`` : float or None
+                Minimum prominence threshold for peak detection.
+            ``maxNbrightest_peaks`` : int
+                Maximum number of bright peaks used for the initial match.
+
+            Defaults to ``None`` (equivalent to using all default calibration
+            parameters).
+
+        Returns
+        -------
+        result : list of np.ndarray
+            List containing one wavelength-calibrated spectrum per extracted
+            order. Each element has shape ``(N, 2)`` where:
+
+            - ``[:, 0]`` contains wavelengths in Angstrom
+            - ``[:, 1]`` contains the corresponding extracted flux values
+
+            The wavelength axis is generated from the polynomial wavelength
+            solution derived for the corresponding order.
+
+        Notes
+        -----
+        Wavelength calibration is recomputed every time this method is called,
+        based on the currently stored calibration frame ``self.calib`` and the
+        specified extraction geometry.
+
+        If ``flat_correction=False``, the returned fluxes are uncorrected raw
+        extracted counts.
+
+        Examples
+        --------
+        Extract all orders from a science frame:
+
+        >>> spectra = obs.get_spectrum("target.fits")
+        >>> spectra[0].shape
+        (3056, 2)
+
+        Extract only the first order with flat correction enabled:
+
+        >>> spec = obs.get_spectrum(
+        ...     "target.fits",
+        ...     flat_correction=True,
+        ...     readout_kwargs={"order": 0}
+        ... )
+
+        Use custom wavelength-calibration settings:
+
+        >>> spec = obs.get_spectrum(
+        ...     "target.fits",
+        ...     calibration_kwargs={
+        ...         "poly_order": 4,
+        ...         "pattern_size": 4,
+        ...         "peak_min_dist": 8
+        ...     }
+        ... )
+
+        Access wavelength and flux arrays separately:
+
+        >>> wavelength = spectra[0][:, 0]
+        >>> flux = spectra[0][:, 1]
+        """
+
+        if readout_kwargs == None:
+            readout_kwargs = {}
+
+        if calibration_kwargs == None:
+            calibration_kwargs = {}
+
+
+
+        # parse the readout dictionary
+        if "aperture_offsets" in readout_kwargs:
+            aperture_offsets = readout_kwargs["aperture_offsets"]
+
+            if aperture_offsets == None:
+                aperture_offsets = 0.
+        else:
+            aperture_offsets = 0.
+        
+        if "aperture_height" in readout_kwargs:
+            aperture_height = readout_kwargs["aperture_height"]
+        else:
+            aperture_height=None
+
+        if "order" in readout_kwargs:
+            order = readout_kwargs["order"]
+        else:
+            order=None
+
+
+
+        # parse the wavelength calibration dictionary
+        if "poly_order" in calibration_kwargs:
+            poly_order = calibration_kwargs["poly_order"]
+        else:
+            poly_order = 3
+
+
+        if "pattern_size" in calibration_kwargs:
+            pattern_size = calibration_kwargs["pattern_size"]
+        else:
+            pattern_size = 5
+
+
+        if "overhang" in calibration_kwargs:
+            overhang = calibration_kwargs["overhang"]
+        else:
+            overhang = 4
+
+        
+        if "peak_min_dist" in calibration_kwargs:
+            peak_min_dist = calibration_kwargs["peak_min_dist"]
+        else:
+            peak_min_dist = 10
+
+        
+        if "peak_prominence_threshold" in calibration_kwargs:
+            peak_prominence_threshold = calibration_kwargs["peak_prominence_threshold"]
+        else:
+            peak_prominence_threshold = None
+
+        
+        if "maxNbrightest_peaks" in calibration_kwargs:
+            maxNbrightest_peaks = calibration_kwargs["maxNbrightest_peaks"]
+        else:
+            maxNbrightest_peaks = 40
+
+
+
+
+        wavelength_calibration_fluxes = self.extract_flux(self.calib, aperture_offsets=aperture_offsets, aperture_height=aperture_height, order=order)
+
+        wavelength_solutions = []
+
+        for these_extracted_fluxes in wavelength_calibration_fluxes: # for each order that needs to be extracted
+            wavelength_solutions.append(get_wavelength_solution_blind(
+                these_extracted_fluxes, # the calibration spectrum as a one-dimensional float array
+                self.calib_lamp.strongest_lines, # list of bright calibration lines, used to find a preliminary wavelength solution
+                self.calib_lamp.line_list_strong, # list of calibration lines, used to refine the preliminary wavelength solution
+                self.spectrograph.wavelength_dispersion * self.camera.pixel_size, # for the DADOS+QHY268M with 1x1 binning use ~0.4
+                maxNbrightest_peaks=maxNbrightest_peaks, # number of bright emission lines based on which a first estimate for a preliminary wavelength solution will be determined
+                tuple_size=pattern_size, # how complex of a pattern to identify. Should be between 3-5
+                order=poly_order, # order of the fitting polynomial
+                peak_prominence_threshold=peak_prominence_threshold, # peak prominence threshold for the detection of peaks in the calibration signal
+                peak_min_dist=peak_min_dist, # minimum distance between neighboring peaks for the peak finder
+                overhang=overhang, # the number of wavelength fit points used to extrapolate a linear function
+                debug=self.debug_mode, # enable or diable debug mode
+                diagnostics_filename = "wavelength_calibration_diagnostics.pdf" # output filename for the diagnostic plots. If diagnostics_filename="", no file is generated. Plot will not be generated in debug=False regardless of whether it is an empty string
+            ))
+
+        spectral_fluxes               = self.extract_flux(spectrum_raw_image, aperture_offsets=aperture_offsets, aperture_height=aperture_height, order=order)
+        
+        if flat_correction:
+            flat_fluxes               = self.extract_flux(self.flat, aperture_offsets=aperture_offsets, aperture_height=aperture_height, order=order)
+        else:
+            flat_fluxes               = np.ones_like(spectral_fluxes)
+
+
+        result = [np.array([wavelength_solution[2](np.arange(spectral_flux.size)), spectral_flux / flat_flux]).T for wavelength_solution, spectral_flux, flat_flux in zip(wavelength_solutions, spectral_fluxes, flat_fluxes)]
+
+        return result
+
+
 
 class CalibModule:
     """
