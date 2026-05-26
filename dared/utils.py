@@ -400,3 +400,269 @@ def rebin_spectrum(wavelengths_old, fluxes_old, wavelengths_new, errs_old=None, 
 
 
     return wavelengths_new, fluxes_new, np.zeros_like(fluxes_new) # the third return value in the tuple is a placeholder value for the flux uncertainties
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def plot_spectrum_sheet(
+    wavelengths,
+    fluxes,
+    reference_lines=None,
+    nrows=10,
+    figsize=(10, 15),
+    output=None,
+    normalize=True,
+    line_color="r",
+    spectrum_color="b",
+):
+    """
+    Create a stacked spectral plot sheet.
+
+    Parameters
+    ----------
+    wavelengths : np.ndarray
+        1D wavelength array.
+
+    fluxes : np.ndarray
+        1D flux array.
+
+    reference_lines : array-like or None, optional
+        List/array of reference wavelengths to mark with vertical lines.
+
+    nrows : int, optional
+        Number of stacked panels.
+
+    figsize : tuple, optional
+        Figure size passed to matplotlib.
+
+    output : str or None, optional
+        Output filename. If None, figure is not saved.
+
+    normalize : bool, optional
+        If True, normalize each panel individually.
+
+    line_color : str, optional
+        Color of reference lines.
+
+    spectrum_color : str, optional
+        Color of spectrum.
+
+    Returns
+    -------
+    fig, axs
+        Matplotlib figure and axes.
+    """
+
+    wavelengths = np.asarray(wavelengths)
+    fluxes = np.asarray(fluxes)
+
+    fig, axs = plt.subplots(
+        nrows=nrows,
+        figsize=figsize,
+        gridspec_kw=dict(hspace=0.3)
+    )
+
+    # Ensure axs is iterable if nrows=1
+    axs = np.atleast_1d(axs)
+
+    pixel_chunks = np.array_split(np.arange(fluxes.size), nrows)
+
+    for ax, pixels in zip(axs, pixel_chunks):
+
+        these_fluxes = fluxes[pixels].astype(float)
+
+        if normalize:
+            these_fluxes -= np.percentile(these_fluxes, 5)
+
+            scale = 2.0 * np.percentile(these_fluxes, 95)
+
+            if scale > 0:
+                these_fluxes /= scale
+
+        these_wavelengths = wavelengths[pixels]
+
+        ax.plot(
+            these_wavelengths,
+            these_fluxes,
+            color=spectrum_color,
+            lw=1
+        )
+
+        ax.set_xlim(
+            np.min(these_wavelengths),
+            np.max(these_wavelengths)
+        )
+
+        if normalize:
+            ax.set_ylim(0, 2)
+
+        if reference_lines is not None:
+            for line in reference_lines:
+                ax.axvline(
+                    line,
+                    color=line_color,
+                    ymin=0.7,
+                    ymax=0.95,
+                    lw=1
+                )
+
+        ax.set_ylabel(r"rel. Flux")
+
+    axs[-1].set_xlabel(r"Wavelength $\lambda$ [Å]")
+
+    if output is not None:
+        fig.savefig(output, bbox_inches="tight")
+
+    return fig, axs
+
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
+
+from .utils import wavelength_to_rgb
+
+
+def plot_synthetic_spectrogram(
+    wavelengths,
+    fluxes,
+    wavelength_range=None,
+    Ninterp=2000,
+    figsize=(10, 1),
+    dpi=200,
+    title="Synthetic Spectrum",
+    output=None,
+    intensity_scale=2.0,
+    background_from_integrated_color=False,
+):
+    """
+    Create a synthetic visible-light spectrogram from a spectrum.
+
+    Parameters
+    ----------
+    wavelengths : np.ndarray
+        1D wavelength array in Angstrom.
+
+    fluxes : np.ndarray
+        1D flux array.
+
+    wavelength_range : tuple or None, optional
+        (min_wavelength, max_wavelength).
+        If None, uses full wavelength range.
+
+    Ninterp : int, optional
+        Number of interpolation points.
+
+    figsize : tuple, optional
+        Figure size.
+
+    dpi : int, optional
+        Figure DPI.
+
+    title : str, optional
+        Plot title.
+
+    output : str or None, optional
+        Output filename.
+
+    intensity_scale : float, optional
+        Multiplier controlling spectrum brightness.
+
+    background_from_integrated_color : bool, optional
+        If True, set figure background to integrated spectrum color.
+
+    Returns
+    -------
+    fig, ax
+        Matplotlib figure and axis.
+    """
+
+    wavelengths = np.asarray(wavelengths, dtype=float)
+    fluxes = np.asarray(fluxes, dtype=float)
+
+    # --------------------------------------------------------------
+    # Wavelength interpolation grid
+    # --------------------------------------------------------------
+    if wavelength_range is None:
+        wmin = wavelengths.min()
+        wmax = wavelengths.max()
+    else:
+        wmin, wmax = wavelength_range
+
+    interp_wavelengths = np.linspace(wmin, wmax, Ninterp)
+
+    # --------------------------------------------------------------
+    # Interpolate flux
+    # --------------------------------------------------------------
+    interpol_fluxes = interp1d(
+        wavelengths,
+        fluxes,
+        bounds_error=False,
+        fill_value=0.0
+    )
+
+    interp_flux = interpol_fluxes(interp_wavelengths)
+
+    # --------------------------------------------------------------
+    # Normalize flux
+    # --------------------------------------------------------------
+    if interp_flux.max() > 0:
+        interp_flux = interp_flux / interp_flux.max()
+
+    # --------------------------------------------------------------
+    # Convert wavelength -> RGB
+    # --------------------------------------------------------------
+    rgb = wavelength_to_rgb(interp_wavelengths)
+
+    # --------------------------------------------------------------
+    # Build synthetic image
+    # --------------------------------------------------------------
+    image = np.clip(
+        intensity_scale
+        * np.expand_dims(rgb, axis=0)
+        * np.expand_dims(interp_flux, axis=(0, 2)),
+        0,
+        1
+    )
+
+    # --------------------------------------------------------------
+    # Integrated color
+    # --------------------------------------------------------------
+    integrated_color = np.sum(
+        np.expand_dims(interp_flux, axis=1) * rgb,
+        axis=0
+    )
+
+    if integrated_color.max() > 0:
+        integrated_color /= integrated_color.max()
+
+    # --------------------------------------------------------------
+    # Plot
+    # --------------------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=figsize,
+        dpi=dpi
+    )
+
+    ax.imshow(
+        image,
+        aspect="auto",
+        extent=[wmin, wmax, 0, 1]
+    )
+
+    ax.set_yticks([])
+    ax.set_xlabel(r"Wavelength $\lambda$ [Å]")
+    ax.set_title(title)
+
+    if background_from_integrated_color:
+        fig.set_facecolor(integrated_color)
+
+    if output is not None:
+        fig.savefig(output, bbox_inches="tight")
+
+    return fig, ax

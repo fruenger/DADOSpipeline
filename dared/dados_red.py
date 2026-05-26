@@ -9,6 +9,8 @@ from scipy.special import comb
 from scipy.spatial import cKDTree
 from scipy.interpolate import interp1d
 from scipy.ndimage import convolve1d
+from pathlib import Path
+from PIL import Image
 
 from .utils import Formatter, get_timestamp, wavelength_to_rgb
 
@@ -67,7 +69,7 @@ class Camera:
     response_curve : np.ndarray, shape (n, 2)
         A two-column array where the first column contains wavelengths in
         Angstrom and the second column contains the corresponding quantum
-        efficiency values (0–1). Used to build a 1D interpolation function.
+        efficiency values (0-1). Used to build a 1D interpolation function.
     pixel_size : float
         Physical size of one pixel in microns.
     chip_model : str, optional
@@ -265,7 +267,7 @@ QHY268M = Camera(
 )
 
 
-def findorder(flat_frame, owidth, Norders, output="", debug=False, order_detection_threshold=None, order_poly_fit_degree=3, maxiter=10):
+def findorder(flat_frame, owidth, Norders, output=None, debug=False, order_detection_threshold=None, order_poly_fit_degree=3, maxiter=10):
     """
     Locate spectral orders in a flat-field image.
 
@@ -349,10 +351,10 @@ def findorder(flat_frame, owidth, Norders, output="", debug=False, order_detecti
         order_center_fits.append(np.poly1d(coefficients))
         fmt.info(f"Spectrum {i} seems to be tilted by an angle of {180/np.pi * np.arcsin(coefficients[-2]):.2f} degrees.") # take the linear term and calculate the tilt of the linear spectra against the image coordinate system.
 
-    if debug: # enable graphical output of the calibration flat data
+    if output != None: # enable graphical output of the calibration flat data
         fig = plt.figure(dpi=200, figsize=(12, 9))
         ax = fig.add_subplot()
-        ax.imshow(flat_frame)
+        img = ax.imshow(flat_frame)
         
         for i in range(Norders):
             ax.scatter(np.arange(flat_frame.shape[1])[::10], all_peaks[::10, i], marker="+", color="k", alpha=0.5) # plot every tenth data point of those that have been found
@@ -360,13 +362,80 @@ def findorder(flat_frame, owidth, Norders, output="", debug=False, order_detecti
             
             ax.plot(x_coords, order_center_fits[i](x_coords) + owidth/2., c="gray", linestyle="--") # draw the upper boundary of each order
             ax.plot(x_coords, order_center_fits[i](x_coords) - owidth/2., c="gray", linestyle="--") # draw the lower boundary of each order
+
+        ax.set_xlabel(r"$x$ pixel coordinate")
+        ax.set_ylabel(r"$y$ pixel coordinate")
+
+        plt.colorbar(img, ax=ax, shrink=0.5, pad=0.02, label="Image brightness [ADU]")
+        fig.savefig(output, bbox_inches="tight")
         
-        if output != "":
-            fig.savefig(output, bbox_inches="tight")
-        
-        plt.show()
+        plt.close()
     
     return order_center_fits # save the coefficients of the polynomial fits to the self.orders instance an make them available for later steps
+
+
+
+
+def extract_data_from_file(filename):
+    """
+    Load image/FITS data into a floating-point numpy array.
+
+    Parameters
+    ----------
+    filename : str or Path
+        Path to the file.
+
+    Returns
+    -------
+    data : np.ndarray
+        Floating-point numpy array.
+    """
+
+    filename = Path(filename)
+
+    # ------------------------------------------------------------------
+    # Check whether file exists
+    # ------------------------------------------------------------------
+    if not filename.exists():
+        raise ValueError(
+            f"The file '{filename}' does not seem to exist!"
+        )
+
+    # ------------------------------------------------------------------
+    # File extension
+    # ------------------------------------------------------------------
+    suffix = filename.suffix.lower()
+
+    # ------------------------------------------------------------------
+    # FITS files
+    # ------------------------------------------------------------------
+    if suffix in [".fits", ".fit"]:
+        data = fits.getdata(filename)
+
+    # ------------------------------------------------------------------
+    # Standard image formats
+    # ------------------------------------------------------------------
+    elif suffix in [".jpg", ".jpeg", ".png", ".tif", ".tiff"]:
+
+        img = Image.open(filename)
+
+        # Convert RGB/RGBA/etc. to grayscale
+        img = img.convert("L")
+
+        # Convert to numpy array
+        data = np.array(img)
+
+    else:
+        raise ValueError(
+            f"Unsupported file format: '{suffix}'"
+        )
+
+    # ------------------------------------------------------------------
+    # Convert to floating point
+    # ------------------------------------------------------------------
+    data = np.asarray(data, dtype=float)
+
+    return data
 
 
 
@@ -430,8 +499,17 @@ class DADOSobservation:
     def __init__(self, flat, calib, calib_lamp, camera=QHY268M, spectrograph=DADOS, **kwargs): # flat frame needs to be specified. Otherwise, cannot identify spectra location
 
         # register the data products used to create the calbration
-        self.flat           = flat
-        self.calib          = calib
+        
+        # if the filename is provided, i.e. the data file name instead of the numpy array directly retrieve the contained data first
+        if isinstance(flat, str):
+            self.flat       = extract_data_from_file(flat)
+        
+        if isinstance(calib, str):
+            self.calib      = extract_data_from_file(calib)
+
+        else:
+            self.flat           = flat
+            self.calib          = calib
 
         # register the hardware components
         self.camera         = camera
@@ -467,7 +545,7 @@ class DADOSobservation:
     
 
     
-    def findorder(self, output="", show_output=False, order_detection_threshold=300, order_poly_fit_degree=3):
+    def findorder(self, output=None, show_output=False, order_detection_threshold=300, order_poly_fit_degree=3):
         """
     Locate spectral orders in the stored flat-field image.
 
@@ -504,7 +582,8 @@ class DADOSobservation:
     >>> len(order_fits)
     3
     """
-        self.orders = findorder(self.flat, self.spectrograph.order_width / self.camera.pixel_size, self.spectrograph.Norders, debug=self.debug_mode, output="order_registration.pdf")
+        # findorder(flat_frame, owidth, Norders, output=None, debug=False, order_detection_threshold=None, order_poly_fit_degree=3, maxiter=10)
+        self.orders = findorder(self.flat, self.spectrograph.order_width / self.camera.pixel_size, self.spectrograph.Norders, debug=self.debug_mode, output=output)
         self.status = "ORDER LOCATIONS FOUND"
 
         return self.orders
@@ -878,7 +957,7 @@ class DADOSobservation:
         wavelength_solutions = []
 
         for these_extracted_fluxes in wavelength_calibration_fluxes: # for each order that needs to be extracted
-            wavelength_solutions.append(get_wavelength_solution_blind(
+            wavelength_solution = get_wavelength_solution_blind(
                 these_extracted_fluxes, # the calibration spectrum as a one-dimensional float array
                 self.calib_lamp.strongest_lines, # list of bright calibration lines, used to find a preliminary wavelength solution
                 self.calib_lamp.line_list_strong, # list of calibration lines, used to refine the preliminary wavelength solution
@@ -891,14 +970,15 @@ class DADOSobservation:
                 overhang=overhang, # the number of wavelength fit points used to extrapolate a linear function
                 debug=self.debug_mode, # enable or diable debug mode
                 diagnostics_filename = "wavelength_calibration_diagnostics.pdf" # output filename for the diagnostic plots. If diagnostics_filename="", no file is generated. Plot will not be generated in debug=False regardless of whether it is an empty string
-            ))
+            )
+            wavelength_solutions.append(wavelength_solution)
 
         spectral_fluxes               = self.extract_flux(spectrum_raw_image, aperture_offsets=aperture_offsets, aperture_height=aperture_height, order=order)
         
         if flat_correction:
             flat_fluxes               = self.extract_flux(self.flat, aperture_offsets=aperture_offsets, aperture_height=aperture_height, order=order)
         else:
-            flat_fluxes               = np.ones_like(spectral_fluxes)
+            flat_fluxes               = np.array([wavelength_solution[2](range(spectral_fluxes.size)) for wavelength_solution, spectral_fluxes in zip(wavelength_solutions, spectral_fluxes)])
 
 
         result = [np.array([wavelength_solution[2](np.arange(spectral_flux.size)), spectral_flux / flat_flux]).T for wavelength_solution, spectral_flux, flat_flux in zip(wavelength_solutions, spectral_fluxes, flat_fluxes)]
@@ -967,7 +1047,7 @@ AlpyArNe = CalibModule(
 
         
 
-def get_hitmatrix(peaks, wavelengths, tuple_size):
+def get_hitmatrix(peaks, wavelengths, tuple_size, wavelength_dispersion_estimate):
     """
     Build a peak-to-wavelength hit matrix via combinatorial pattern matching.
 
@@ -1050,7 +1130,7 @@ def get_hitmatrix(peaks, wavelengths, tuple_size):
         wavelength_dispersion = dist_between_wavelengths / dist_between_peaks
         
         mask = (np.max(wavelength_dispersion, axis=1) / np.min(wavelength_dispersion, axis=1)) < np.clip((np.min(dist_between_peaks, axis=1)+1.) / np.min(dist_between_peaks, axis=1), 1., 1.02)
-        mask = mask & (np.max(np.abs(wavelength_dispersion - 0.41), axis=1) < 0.2)
+        mask = mask & (np.max(np.abs(wavelength_dispersion - wavelength_dispersion_estimate), axis=1) < 0.2)
         
         for i in range(tuples.shape[1]):
             which_peaks, counter = np.unique_counts(tuples[mask, i])
@@ -1101,7 +1181,7 @@ def get_wavelength_solution_blind(
        propagated up and down the full wavelength range of `calib_wavelengths`
        by fitting a rolling linear tail to the current anchor set and querying
        the nearest detected peak.
-    3. **Refinement** — Three iterations of kappa-sigma clipping (3σ) are
+    3. **Refinement** — Three iterations of kappa-sigma clipping (3sigma) are
        applied to the polynomial fit to remove blended or mis-identified lines.
 
     If no valid solution is found with the original dispersion sign, the
@@ -1120,7 +1200,7 @@ def get_wavelength_solution_blind(
         wavelength solution.
     coarse_wavelength_dispersion_estimate : float
         Approximate dispersion in Angstrom per pixel. For the DADOS
-        spectrograph with the QHY268M camera at 1×1 binning use ~0.4.
+        spectrograph with the QHY268M camera at 1x1 binning use ~0.4.
     maxNbrightest_peaks : int, optional
         Maximum number of the most prominent peaks passed to the initial
         pattern matcher. Reducing this value lowers memory use but may hurt
@@ -1143,7 +1223,7 @@ def get_wavelength_solution_blind(
         to ``4``.
     debug : bool, optional
         If ``True``, generates a four-panel diagnostic figure showing the
-        pixel–wavelength associations, fit residuals, dispersion curve, and
+        pixel x wavelength associations, fit residuals, dispersion curve, and
         spectral resolution. Defaults to ``False``.
     diagnostics_filename : str, optional
         File path for the diagnostic figure when ``debug=True``. Pass ``""``
@@ -1190,32 +1270,32 @@ def get_wavelength_solution_blind(
     >>> np.std(residuals)   # RMS wavelength residual in Å
     0.08
     """
-    if peak_prominence_threshold == None:
-        peak_prominence_threshold = 0.
+    if peak_prominence_threshold   == None:
+        peak_prominence_threshold   = 0.
     
     already_tried_flipping_spectrum = False # a safe parachute so see if the spectrum needs to be flipped in order to successfully run through the wavelength calibration
-    calib_wavelengths = np.sort(np.asarray(calib_wavelengths))
+    calib_wavelengths               = np.sort(np.asarray(calib_wavelengths))
 
     # homogenize the input and convert them to numpy arrays
-    spectrum                = np.asarray(spectrum)
-    first_guess_wavelengths = np.asarray(first_guess_wavelengths)
+    spectrum                        = np.asarray(spectrum)
+    first_guess_wavelengths         = np.asarray(first_guess_wavelengths)
 
     # normalize the flux
-    spectrum                = np.clip((spectrum - np.median(spectrum)) / np.median(np.abs(np.diff(spectrum))), 0, np.inf)
+    spectrum                        = np.clip((spectrum - np.median(spectrum)) / np.median(np.abs(np.diff(spectrum))), 0, np.inf)
 
     while True: # the outer loop to see whether the spectrum needs to be flipped. This while loop will be executed at most twice.
 
         # detect emission peaks
-        all_peaks, all_peak_params     = find_peaks(spectrum, prominence=peak_prominence_threshold, distance=peak_min_dist)
+        all_peaks, all_peak_params  = find_peaks(spectrum, prominence=peak_prominence_threshold, distance=peak_min_dist)
 
-        if all_peaks.size             <= maxNbrightest_peaks:
+        if all_peaks.size          <= maxNbrightest_peaks:
             fmt.warning("Only %i peaks were found which the wavelength solution can be based on. This is less than the provided `maxNbrightest_peaks`. If this is unwanted behaviour, consider lowering the `peak_prominence_threshold` setting which is currently set to %.1f." % (all_peaks.size, peak_prominence_threshold))
 
         if debug:
             fmt.info("Found %i peaks in the spectrum." % all_peaks.size)
 
         # make a subselection of all of those peaks if necessary (too many of those can confuse the routine to find a first wavelength solution)
-        if all_peaks.size > maxNbrightest_peaks:
+        if all_peaks.size      > maxNbrightest_peaks:
             if debug:
                 fmt.info("More peaks found than allowed maximum for first fit estimation! Proceeding with the %i most prominent ones." % maxNbrightest_peaks)
             sorted_prominence  = np.sort(all_peak_params["prominences"])
@@ -1240,7 +1320,7 @@ def get_wavelength_solution_blind(
 
         if debug:
             fmt.info("Now scanning the spectrum for preliminary wavelength solutions ...")
-        counter = 0
+        counter                = 0
         while True:
             if last_iter_flag:
                 break
@@ -1253,7 +1333,7 @@ def get_wavelength_solution_blind(
             peak_mask          = (peaks > (upper_bound - window_size)) & (peaks < upper_bound)
 
             try:
-                all_hit_matrices.append(get_hitmatrix(peaks[peak_mask], first_guess_wavelengths, tuple_size))
+                all_hit_matrices.append(get_hitmatrix(peaks[peak_mask], first_guess_wavelengths, tuple_size, wavelength_dispersion_estimate=coarse_wavelength_dispersion_estimate))
                 all_peaks_in_selection.append(peaks[peak_mask])
                 all_false_combinations.append(comb(np.sum(peak_mask) - first_guess_wavelengths.size, first_guess_wavelengths.size))
 
