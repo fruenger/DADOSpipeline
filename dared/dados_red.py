@@ -1502,8 +1502,8 @@ def get_wavelength_solution_blind(
             fit_wavelengths = fit_wavelengths[inliers]
 
 
-        fit_peak_pos        = np.flip(fit_peak_pos[inliers])
-        fit_wavelengths     = np.flip(fit_wavelengths[inliers])
+        fit_peak_pos        = np.flip(fit_peak_pos)
+        fit_wavelengths     = np.flip(fit_wavelengths)
 
     else:
         wavelength_solution = np.poly1d(np.polyfit(fit_peak_pos, fit_wavelengths, deg=order))
